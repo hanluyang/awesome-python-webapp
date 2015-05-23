@@ -93,28 +93,29 @@ class MultiColumnsError(DBError):
     pass
 
 #该类中定义了四个方法(除了__init__)，cursor,commit,rollback,cleanup
-# _LasyConnection的命名目的？故意写错？
 class _LasyConnection(object):
 
     def __init__(self):
         self.connection = None
 
-    #connection的cursor指的是什么？光标？
+    #connection的cursor！ # cursor指的是SQL语言中的游标功能，具体待深入研究。 
     def cursor(self):
         if self.connection is None:
-            #engine.connect()的作用域，全局？################################################关键####
+            #engine！全局！   #该脚本的入口是create_engine，其中已经将engine声明为global变量
+            #engine.connect()返回的是engine._connect()函数；._connect()函数返回的是MySQLConnection对象
+            #我觉得不用这么麻烦，直接返回对象就好了，不用层层返回函数；这时不需要使用lambda
             connection = engine.connect()
             logging.info('open connection <%s>...' % hex(id(connection)))
             #结合前一句，为什么不直接写成self.connection = engine.connect()? #因为之后的操作可能对self.connection有影响，进而影响logging.info的输出。
             self.connection = connection
         return self.connection.cursor()
-
+    #connection的commit！ #也是SQL语言之一
     def commit(self):
         self.connection.commit()
-
+    #connection的rollback！ #也是SQL语言之一
     def rollback(self):
         self.connection.rollback()
-
+    #connection的close！#也是SQL语言之一
     def cleanup(self):
         if self.connection:
             connection = self.connection
@@ -125,6 +126,8 @@ class _LasyConnection(object):
 #重要类（一）
 #该类中定义了三个方法(除了__init__和is_init):init, cleanup, cursor
 #区分包模块和类的区别？
+#为什么也提供了cleanup和cursor方法？为什么不提供rollback和commit方法？
+#threading.local！  #在threading中local模块是被导入的，具体代码在_threading_local中
 class _DbCtx(threading.local):
     '''
     Thread local object that holds connection info.
@@ -134,11 +137,10 @@ class _DbCtx(threading.local):
         self.transactions = 0
 
     def is_init(self):
-        #为什么不直接return self.connection? #两者差别很大：一个返回布尔型，一个返回任意类型
+        #为什么不直接return self.connection！ #两者差别很大：一个返回布尔型，一个返回任意类型
         return not self.connection is None
 
     def init(self):
-        #lazy conneciton是什么？
         logging.info('open lazy connection...')
         self.connection = _LasyConnection()
         self.transactions = 0
@@ -154,7 +156,6 @@ class _DbCtx(threading.local):
         return self.connection.cursor()
 
 # thread-local db context:
-#作用域？整个模块？注意下面类中global _db_ctx的呼应
 _db_ctx = _DbCtx()
 
 # global engine object:
@@ -165,41 +166,44 @@ class _Engine(object):
 
     def __init__(self, connect):
         self._connect = connect
-
+        
     def connect(self):
         return self._connect()
 
 def create_engine(user, password, database, host='127.0.0.1', port=3306, **kw):
-    #mysql包？
+    #mysql包！  #需要先了解SQL，之后深入
     import mysql.connector
-    #global？
+    #global！   #如果函数里用到了外部变量，则使用需要global（赋值时，必须；调用时，最好）
     global engine
     if engine is not None:
         raise DBError('Engine is already initialized.')
     params = dict(user=user, password=password, database=database, host=host, port=port)
     defaults = dict(use_unicode=True, charset='utf8', collation='utf8_general_ci', autocommit=False)
     for k, v in defaults.iteritems():
-        #kw.pop?
+        #kw.pop！  #kw指的是参数中的**kw, kw.pop()优先返回kw中的设置，否则返回defaults
         params[k] = kw.pop(k, v)
-    #dict.update?
+    #dict.update！ #添加kw中的其他设置到params
     params.update(kw)
+    #'buffered'不能由用户设置，因而放在最后设定！
     params['buffered'] = True
-    #lambda表达式？
+    #lambda表达式！ #lambda用于快速定义函数，这里函数参数是params，返回是connect对象
     engine = _Engine(lambda: mysql.connector.connect(**params))
     # test connection...
+    #hex!   #用于显示十六进制
     logging.info('Init mysql engine <%s> ok.' % hex(id(engine)))
 
 class _ConnectionCtx(object):
     '''
     _ConnectionCtx object that can open and close connection context. _ConnectionCtx object
-    can be nestd and onoly the outer connection has effect.
+    can be nestd and only the outer connection has effect.
 
     with connection():
         pass
         with connection():
             pass
     '''
-
+    
+    #为什么要嵌套_ConnectionCtx?
     def __enter__(self):
         global _db_ctx
         self.should_cleanup = False
@@ -213,7 +217,7 @@ class _ConnectionCtx(object):
         if self.should_cleanup:
             _db_ctx.cleanup()
 
-#为什么要专门建立这个函数
+#为什么要专门建立这个函数！  #大概是惯例吧：希望从函数接口操作类对象，而非直接操作
 def connection():
     '''
     Return _ConnectionCtx object that can be used by 'with'  statement:
@@ -239,6 +243,8 @@ def with_connection(func):
             return func(*args, **kw)
     return _wrapper
 
+# transaction事务!  #属于SQL的内容，之后深入
+#注意这里定义了commit和rollback方法，没有定义cleanup和cursor，和_DBCtx刚好相反
 class _TransactionCtx(object):
     '''
     _TransactionCtx object that can handle transactions.
@@ -251,10 +257,12 @@ class _TransactionCtx(object):
         global _db_ctx
         self.should_close_conn = False
         if not _db_ctx.is_init():
-            # needs opne a connection first:
+            # needs open a connection first:
             _db_ctx.init()
             self.should_close_conn = True
+        #和_ConnectionCtx不同，事务嵌套需要计数
         _db_ctx.transactions = _db_ctx.transactions + 1
+        #注意学习下面if else的写法！
         logging.info('begin transaction...' if _db_ctx.transactions==1 else 'join current transaction...')
         return self
 
@@ -282,7 +290,7 @@ class _TransactionCtx(object):
             _db_ctx.connection.rollback()
             logging.warning('rollback ok.')
             raise
-    #rollback是干嘛？
+    
     def rollback(self):
         global _db_ctx
         logging.warning('rollback transaction...')
@@ -351,21 +359,22 @@ def _select(sql, first, *args):
     ' execute select SQL and return unique result or list results.'
     global _db_ctx
     cursor = None
-    #sql.replace的作用是？
+    #sql.replace的作用是！  #?充当占位符，替换成%s，从而传入参数
     sql = sql.replace('?', '%s')
     logging.info('SQL: %s, ARGS: %s' % (sql, args))
+    #接下来的数行进行的是游标操作！
+    #需要根据cursor和connection.py进行理解！之后深入
     try:
         cursor = _db_ctx.connection.cursor()
         cursor.execute(sql, args)
         if cursor.description:
-            #列表解析？
             names = [x[0] for x in cursor.description]
         #first决定了之后两个函数select_one,select的区别
         if first:
             values = cursor.fetchone()
             if not values:
                 return None
-            #注意这里用了Dict!
+            #注意返回的是Dict组成的列表
             return Dict(names, values)
         return [Dict(names, x) for x in cursor.fetchall()]
     finally:
@@ -421,6 +430,7 @@ def select_int(sql, *args):
         ...
     MultiColumnsError: Expect only one column.
     '''
+    # 了解dict的所有方法！
     d = _select(sql, True, *args)
     if len(d)!=1:
         raise MultiColumnsError('Expect only one column.')
